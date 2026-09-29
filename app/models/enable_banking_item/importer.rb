@@ -476,7 +476,13 @@ class EnableBankingItem::Importer
       # Deduplicate API response: Enable Banking sometimes returns the same logical
       # transaction with different entry_reference IDs in the same response.
       # Remove content-level duplicates before storing. (Issue #954)
-      all_transactions = deduplicate_api_transactions(all_transactions)
+      all_transactions = if n26?
+        EnableBankingItem::N26TransactionIdentity.normalize(
+          all_transactions, existing: enable_banking_account.raw_transactions_payload.to_a
+        )
+      else
+        deduplicate_api_transactions(all_transactions)
+      end
 
       # Post-fetch safety filter: some ASPSPs ignore date_from or return extra transactions
       all_transactions = filter_transactions_by_date(all_transactions, start_date)
@@ -526,6 +532,15 @@ class EnableBankingItem::Importer
           end
         end
 
+        if n26?
+          # Refresh settled/corrected rows as well as adding new identities.
+          # The entry processor still respects user edits and import locks.
+          merged = existing_transactions.index_by { |tx| EnableBankingEntry::Processor.compute_external_id(tx) }
+          all_transactions.each { |tx| merged[EnableBankingEntry::Processor.compute_external_id(tx)] = tx }
+          enable_banking_account.upsert_enable_banking_transactions_snapshot!(merged.values)
+          return { success: true, transactions_count: transactions_count }
+        end
+
         existing_ids = existing_transactions.map { |tx|
           EnableBankingEntry::Processor.compute_external_id(tx)
         }.compact.to_set
@@ -545,12 +560,23 @@ class EnableBankingItem::Importer
       end
 
       { success: true, transactions_count: transactions_count }
+    rescue EnableBankingItem::N26TransactionIdentity::AmbiguousReferenceError => e
+      DebugLogEntry.capture(
+        category: "provider_sync_error", level: "error", message: e.message,
+        source: self.class.name, provider_key: "enable_banking",
+        family: enable_banking_item.family, account_provider: enable_banking_account.account_provider
+      )
+      { success: false, transactions_count: 0, error: handle_sync_error(e) }
     rescue Provider::EnableBanking::EnableBankingError => e
       Rails.logger.error "EnableBankingItem::Importer - Error fetching transactions for account #{enable_banking_account.uid}: #{e.message}"
       { success: false, transactions_count: 0, error: handle_sync_error(e) }
     rescue => e
       Rails.logger.error "EnableBankingItem::Importer - Unexpected error fetching transactions for account #{enable_banking_account.uid}: #{e.class} - #{e.message}"
       { success: false, transactions_count: 0, error: handle_sync_error(e) }
+    end
+
+    def n26?
+      enable_banking_item.aspsp_name.to_s.match?(/\AN26\b/i)
     end
 
     # Deduplicate transactions from the Enable Banking API response.

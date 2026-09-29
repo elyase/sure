@@ -20,6 +20,8 @@ class EnableBankingEntry::Processor
   # }
   def self.compute_external_id(raw_transaction_data)
     data = raw_transaction_data.with_indifferent_access
+    return data[:_sure_external_id] if data[:_sure_external_id].present?
+
     id = data[:transaction_id].presence || data[:entry_reference].presence
     return "enable_banking_#{id}" if id
 

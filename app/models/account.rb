@@ -80,6 +80,15 @@ class Account < ApplicationRecord
       .distinct
   }
 
+  # Accounts a user can annotate (category, tags, notes, merchant): owned,
+  # or shared with full_control or read_write
+  scope :annotatable_by, ->(user) {
+    left_joins(:account_shares)
+      .where("accounts.owner_id = :uid OR (account_shares.user_id = :uid AND account_shares.permission IN (:permissions))",
+             uid: user.id, permissions: AccountShare::ANNOTATE_PERMISSIONS)
+      .distinct
+  }
+
   # Accounts that count in a user's financial calculations
   scope :included_in_finances_for, ->(user) {
     left_joins(:account_shares)
@@ -175,7 +184,10 @@ class Account < ApplicationRecord
       attrs = attributes.dup
       attrs[:cash_balance] = attrs[:balance] unless attrs.key?(:cash_balance)
       account = new(attrs)
-      initial_balance = attributes.dig(:accountable_attributes, :initial_balance)&.to_d
+      # Presence is read from the raw value: a blank form field arrives as ""
+      # and would convert to a very present-looking 0.
+      raw_initial_balance = attributes.dig(:accountable_attributes, :initial_balance)
+      initial_balance = raw_initial_balance.to_d if raw_initial_balance.present?
 
       transaction do
         account.save!
@@ -186,6 +198,29 @@ class Account < ApplicationRecord
           date: opening_balance_date
         )
         raise result.error if result.error
+
+        # When the opening balance differs from the entered current balance
+        # (a loan created with its original principal), the opening anchor is
+        # the account's only entry — the initial sync would recalculate
+        # today's balance back to it, silently discarding what the user just
+        # typed. Anchor today's balance too so both survive.
+        #
+        # Only when the opening anchor is on an earlier day: the opening date
+        # is user-supplied and may be today, and a same-day reconciliation
+        # would be matched to the opening anchor by date and overwrite it.
+        # On its own date the opening balance wins.
+        if initial_balance && initial_balance != account.balance && manager.opening_date < Date.current
+          # An explicit reconciliation, not CurrentBalanceManager: for cash
+          # accounts its transaction-adjustment strategy computes a zero delta
+          # here (account.balance already holds the entered value) and would
+          # only rewrite the opening anchor, leaving today's balance unanchored
+          # for the first sync.
+          reconciliation = Account::ReconciliationManager.new(account).reconcile_balance(
+            balance: account.balance,
+            date: Date.current
+          )
+          raise reconciliation.error_message unless reconciliation.success?
+        end
 
         account.auto_share_with_family! if account.family.share_all_by_default?
       end
@@ -370,8 +405,40 @@ class Account < ApplicationRecord
       create_and_sync(attributes, skip_initial_sync: true)
     end
 
+    TRADE_REPUBLIC_ACCOUNT_TYPES = {
+      "portfolio" => [ "Investment", "brokerage", "Trade Republic Portfolio" ],
+      "cash" => [ "Depository", "checking", "Trade Republic Cash" ],
+      # The exchange subtype is the Crypto subtype that supports trades.
+      "crypto" => [ "Crypto", "exchange", "Trade Republic Crypto" ]
+    }.freeze
+
+    def create_from_trade_republic_account(trade_republic_account)
+      family = trade_republic_account.trade_republic_item.family
+      accountable_type, subtype, default_name = TRADE_REPUBLIC_ACCOUNT_TYPES.fetch(trade_republic_account.kind)
+
+      attributes = {
+        family: family,
+        name: trade_republic_account.name.presence || default_name,
+        balance: 0,
+        cash_balance: 0,
+        currency: trade_republic_account.currency.presence || family.currency,
+        accountable_type: accountable_type,
+        accountable_attributes: {
+          subtype: subtype
+        }
+      }
+
+      create_and_sync(attributes, skip_initial_sync: true)
+    end
+
     def create_from_kraken_account(kraken_account)
       create_from_crypto_exchange_account(kraken_account, family: kraken_account.kraken_item.family)
+    end
+
+    # Creates a manual Crypto account for a newly-selected CoinSpot account,
+    # owned by the connection's family.
+    def create_from_coinspot_account(coinspot_account)
+      create_from_crypto_exchange_account(coinspot_account, family: coinspot_account.coinspot_item.family)
     end
 
     # Self-custody assets are wallets, not exchanges: no trade entry by hand,
@@ -669,10 +736,15 @@ class Account < ApplicationRecord
       if Current.user.present? && Current.user.family_id == family_id
         self.owner = Current.user
       else
+        # `id` breaks ties on `created_at`. Two users of the same role can share
+        # a timestamp (they are created in one transaction, or the column is
+        # backfilled), and ordering on `created_at` alone leaves the winner to
+        # the query plan — so the same family can get a different default owner
+        # from one call to the next.
         self.owner =
-          family&.users&.where(role: "admin")&.order(:created_at)&.first ||
-          family&.users&.where(role: "super_admin")&.order(:created_at)&.first ||
-          family&.users&.order(:created_at)&.first
+          family&.users&.where(role: "admin")&.order(:created_at, :id)&.first ||
+          family&.users&.where(role: "super_admin")&.order(:created_at, :id)&.first ||
+          family&.users&.order(:created_at, :id)&.first
       end
     end
 

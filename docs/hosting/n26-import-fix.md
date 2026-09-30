@@ -1,7 +1,7 @@
-# N26 transaction identity fix
+# N26 and Revolut transaction identity fixes
 
-This fork contains a focused Enable Banking importer change for institutions
-whose name starts with `N26`. Other institutions retain upstream behavior.
+This fork contains focused Enable Banking importer changes for N26 and Revolut.
+Other institutions retain upstream behavior.
 
 N26 history can contain distinct, identical-looking booked payments without
 transaction IDs or entry references. The importer now preserves the number of
@@ -17,6 +17,13 @@ response cause a visible sync failure instead of silently discarding a row.
 
 The `_sure_external_id` field is local import metadata. Original bank fields
 remain intact. Keep this metadata with stored snapshots when upgrading.
+
+For Revolut, content deduplication includes the bank's entry reference. This
+preserves distinct payments with identical dates, amounts and descriptions when
+`transaction_id` is absent, while removing repeated copies of the same record.
+Existing entry IDs and the usual incremental merge remain unchanged. The
+regression covers pagination, overlapping pages and reordered repeat imports.
+The additional N26 identity rules described above remain specific to N26.
 
 This addresses the observed N26 cases associated with upstream issues
 [#2720](https://github.com/we-promise/sure/issues/2720) and

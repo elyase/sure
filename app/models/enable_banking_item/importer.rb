@@ -642,7 +642,11 @@ class EnableBankingItem::Importer
       tid = tx[:transaction_id]
       direction = tx[:credit_debit_indicator]
 
-      [ date, amount, currency, creditor, debtor, remittance_key, tid, direction ].map(&:to_s).join("\x1F")
+      fields = [ date, amount, currency, creditor, debtor, remittance_key, tid, direction ]
+      # Revolut omits transaction_id but supplies stable entry references. Two
+      # separate payments can otherwise have identical contents; retain both.
+      fields << tx[:entry_reference] if enable_banking_item.aspsp_name.to_s.match?(/\ARevolut\b/i)
+      fields.map(&:to_s).join("\x1F")
     end
 
     class PaginationTruncatedError < StandardError; end

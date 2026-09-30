@@ -43,18 +43,15 @@ days. Existing bank consents retain their original expiry until reauthorization.
 
 Build the complete source using Apple's container runtime. The old three-file
 v0.7.4 overlay is retired because it omits upstream dependencies, assets and
-migrations. Export only tracked files for a clean build context; excluding the
-ignore file avoids Apple's context-ordering issue with nested `.keep` files.
+migrations. The helper archives tracked source into a flat build context to
+avoid Apple's recursive context-transfer issues. It uses upstream's Dockerfile
+with only the source-copy step replaced by archive extraction.
 
 ```sh
-build_context="$(mktemp -d)"
-git archive HEAD | tar -x -C "$build_context"
-rm "$build_context/.dockerignore"
-container build --platform linux/arm64 --cpus 4 --memory 6G \
-  --file "$build_context/Dockerfile" \
-  --build-arg BUILD_COMMIT_SHA="$(git rev-parse HEAD)" \
-  --tag sure:local "$build_context"
+bin/build-apple-container localhost/elyase/sure:main-integrated
 ```
+
+The build budget is 4 CPUs and 6 GiB.
 
 Back up PostgreSQL and rehearse pending migrations on an isolated database copy
 before replacing the web and worker containers. Preserve database and storage

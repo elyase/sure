@@ -1,0 +1,16 @@
+#!/bin/bash
+# Build tracked source only; archive transfer avoids recursive-context bugs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+build_context="$(mktemp -d)"
+trap 'rm -rf "$build_context"' EXIT
+git archive HEAD > "$build_context/source.tar"
+for file in .ruby-version Gemfile Gemfile.lock; do
+  git show "HEAD:$file" > "$build_context/$file"
+done
+# Keep dependency and asset steps aligned with upstream's Dockerfile.
+git show HEAD:Dockerfile | sed 's/^COPY \. \.$/ADD source.tar ./' > "$build_context/Dockerfile"
+container build --platform linux/arm64 --cpus 4 --memory 6G \
+  --file "$build_context/Dockerfile" \
+  --build-arg BUILD_COMMIT_SHA="$(git rev-parse HEAD)" \
+  --tag "${1:-localhost/elyase/sure:main-integrated}" "$build_context"

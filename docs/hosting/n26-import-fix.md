@@ -37,14 +37,29 @@ Back up the database and preserve the original provider response before recovery
 Verify entry multiplicity and transaction nets against the bank, then repeat the
 import to ensure it does not create additional entries.
 
-The local overlay build uses the pinned upstream image and changes only three
-Ruby files:
+The fork now includes upstream main at `20352e1a` (September 30, 2026),
+including bank-specific consent duration support with a default ceiling of 180
+days. Existing bank consents retain their original expiry until reauthorization.
+
+Build the complete source using Apple's container runtime. The old three-file
+v0.7.4 overlay is retired because it omits upstream dependencies, assets and
+migrations. Export only tracked files for a clean build context; excluding the
+ignore file avoids Apple's context-ordering issue with nested `.keep` files.
 
 ```sh
-container build --platform linux/arm64 --cpus 2 --memory 2G \
-  --file Containerfile.n26 --build-arg PATCH_COMMIT_SHA="$(git rev-parse HEAD)" \
-  --tag sure:n26-local .
+build_context="$(mktemp -d)"
+git archive HEAD | tar -x -C "$build_context"
+rm "$build_context/.dockerignore"
+container build --platform linux/arm64 --cpus 4 --memory 6G \
+  --file "$build_context/Dockerfile" \
+  --build-arg BUILD_COMMIT_SHA="$(git rev-parse HEAD)" \
+  --tag sure:local "$build_context"
 ```
+
+Back up PostgreSQL and rehearse pending migrations on an isolated database copy
+before replacing the web and worker containers. Preserve database and storage
+volumes, credentials, and existing bank sessions. Runtime services use 1 CPU and
+1 GiB each for web and worker; tests use 2 CPUs and 3 GiB.
 
 Run the Enable Banking model and importer tests before deployment. Validate
 Linux/amd64 separately before using that architecture. No bank credentials or
